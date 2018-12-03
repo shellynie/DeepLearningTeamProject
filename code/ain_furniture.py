@@ -45,6 +45,8 @@ class FurnitureDataset(Dataset):
             img = Image.open(p)
             img = self.transform(img)
         except:
+            return torch.zeros((3, 224, 224)), 200
+        '''
             img = self.transform(Image.open(DEF[self.preffix]))
             idx = 1
 
@@ -52,10 +54,27 @@ class FurnitureDataset(Dataset):
         if c != 3 or w != 224 or h != 224:
         	img = self.transform(Image.open(DEF[self.preffix]))
         	idx = 1
+        '''
+
+        c, w, h = img.shape
+        if c != 3 or w != 224 or h != 224:
+            return torch.zeros((3, 224, 224)), 200
 
         target = self.labels[idx] if len(self.labels) > 0 else -1
 
         return img, target
+
+def collate(batch):
+    new_img = []
+    new_target = []
+    for img, target in batch:
+        if target == 200:
+            continue
+        c, w, h = img.shape
+        new_img.append(img.view(1, c, w, h))
+        new_target.append(target)
+    return torch.cat(new_img), torch.from_numpy(np.array(new_target))
+
     
 def preprocess_crop():
     return transforms.Compose([
@@ -253,21 +272,24 @@ def main():
         dataset = FurnitureDataset('valid', transform=preprocess_crop()),
         num_workers = 0,
         batch_size = batch_size,
-        shuffle = True
+        shuffle = True,
+        collate_fn = collate
     )
     
     dev_generator = DataLoader(
         dataset = FurnitureDataset('valid', transform=preprocess_crop()),
         num_workers = 0,
         batch_size = batch_size,
-        shuffle = False
+        shuffle = False,
+        collate_fn = collate
     )
     
     test_generator = DataLoader(
         dataset = FurnitureDataset('test', transform=preprocess_crop()),
         num_workers = 0,
         batch_size = batch_size,
-        shuffle = False
+        shuffle = False,
+        collate_fn = collate
     )
 
     training_routine(model, n_iters, gpu, train_generator, dev_generator, test_generator)
