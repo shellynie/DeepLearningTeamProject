@@ -24,13 +24,13 @@ ROOT_DIR = '/home/xiejie/project'
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
 CKPT_DIR = os.path.join(ROOT_DIR, 'ckpts')
 NUM_EPOCHS = 80
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # DEVICE = 'cpu'
 RANDOM_SEED = 42
 SHUFFLE_DATASET = True
 NUM_WORKERS = 0
-LR = 0.002
+LR = 0.005
 IMAGE_SIZE = 224
 LOG_FREQ = 5
 CKPT_FREQ = 4
@@ -83,14 +83,14 @@ class Resnet101(nn.Module):
         super(Resnet101, self).__init__()
         resnet = models.resnet101(pretrained=True)
         self.resnet = nn.Sequential(*list(resnet.children())[:-1])  # remove the last layer
-        # if not for initilization, freeze all layers except for the last linear layer
-        if not init:
-            for p in self.resnet.parameters():
+        for p in self.resnet.parameters():
+            if not init:
                 p.requires_grad = False
+            else:
+                p.requires_grad = True
         self.classifier = nn.Linear(2048, 128)
 
     def forward(self, x):
-        self.resnet.eval()
         out = self.resnet(x)
         return self.classifier(out.view(out.size(0), -1))
 
@@ -100,14 +100,14 @@ class Densenet121(nn.Module):
         super(Densenet121, self).__init__()
         densenet = models.densenet121(pretrained=True)
         self.embedding = densenet.features
-        # if not for initilization, freeze all layers except for the last linear layer
-        if not init:
-            for p in self.embedding.parameters():
+        for p in self.embedding.parameters():
+            if not init:
                 p.requires_grad = False
+            else:
+                p.requires_grad = True
         self.classifier = nn.Linear(1024, 128)
 
     def forward(self, x):
-        self.embedding.eval()
         features = self.embedding(x)
         out = F.relu(features, inplace=True)
         out = F.avg_pool2d(out, kernel_size=7, stride=1).view(features.size(0), -1)
@@ -136,7 +136,7 @@ class Trainer():
             torch.cuda.empty_cache()
             start_time = time.time()
             epoch_loss = 0
-            correct = 0
+            # correct = 0
             num_nonempty_batches = 0
             num_samples = 0
             for i_batch, (batch_data, batch_label) in enumerate(self.trainLoader):
@@ -144,33 +144,31 @@ class Trainer():
                 if batch_data is None:
                     continue
                 num_nonempty_batches += 1
+                batch_size = batch_data.size(0)
+                num_samples += batch_size
                 self.optimizer.zero_grad()
-                num_samples += batch_data.size(0)
-
                 self.model.train()
                 trainOutput = self.model(batch_data)
-                pred = trainOutput.data.max(1, keepdim=True)[1]
-                predicted = pred.eq(batch_label.view_as(pred))
-                batch_correct = predicted.sum().item()
-                batch_size = predicted.size(0)
-                correct += batch_correct
-
+                # pred = trainOutput.data.max(1, keepdim=True)[1]
+                # predicted = pred.eq(batch_label.view_as(pred))
+                # batch_correct = predicted.sum().item()
+                # correct += batch_correct
                 trainLoss = self.criterion(trainOutput, batch_label)
                 trainLossVal = trainLoss.data.item()
                 trainLoss.backward()
                 self.optimizer.step()
                 epoch_loss += trainLossVal
                 if i_batch % LOG_FREQ == 0:
-                    print('Batch: {0}, Train Loss: {1:.4f}, Train Acc: {2:.4f}'.format(i_batch, epoch_loss / num_nonempty_batches, correct / num_samples))
+                    print('Batch ({0}): {1}, Train Loss: {2:.4f}'.format(batch_size, i_batch, epoch_loss / num_nonempty_batches))
             train_loss = epoch_loss / num_nonempty_batches
-            train_acc = correct / num_samples
-            val_loss, val_acc = inference(self.model, self.criterion, self.devLoader)
-            print("Epoch: {0}, Train Loss: {1:.8f}, Train Acc: {2:.8f}, Val Loss: {3:.8f}, Val Acc: {4:.8f}".format(i+1, train_loss, train_acc, val_loss, val_acc))
+            # train_acc = correct / num_samples
+            val_loss, val_acc, val_num_samples = inference(self.model, self.criterion, self.devLoader)
+            print("Epoch: {0}, Train Loss ({1}): {2:.8f}, Val Loss ({3}): {4:.8f}, Val Acc: {5:.8f}".format(i+1, num_samples, train_loss, val_num_samples, val_loss, val_acc))
             hours, rem = divmod(time.time() - start_time, 3600)
             minutes, seconds = divmod(rem, 60)
             print('epoch train time: {:0>2}:{:0>2}:{:05.2f}'.format(int(hours), int(minutes), seconds))
             self.logger.add_scalar("train/loss", train_loss, i+1)
-            self.logger.add_scalar("train/acc", train_acc, i+1)
+            # self.logger.add_scalar("train/acc", train_acc, i+1)
             self.logger.add_scalar("val/loss", val_loss, i+1)
             self.logger.add_scalar("val/acc", val_acc, i+1)
             self.scheduler.step(val_acc)
@@ -205,7 +203,7 @@ def inference(model, criterion, devLoader):
             predicted = pred.eq(batch_label.view_as(pred))
             correct += predicted.sum().item()
             loss += criterion(out, batch_label).data.item()
-        return (loss / num_nonempty_batches, correct / num_samples)
+        return (loss / num_nonempty_batches, correct / num_samples, num_samples)
 
 
 # def predict(mlp, name, loader, load_path):
@@ -235,8 +233,8 @@ def train_model1(train_loader, dev_loader):
         print('Using {} GPUs.'.format(torch.cuda.device_count()))
         model = nn.DataParallel(model)
     optimizer = optim.Adam(model.parameters(),lr=LR)
-    # scheduler = ReduceLROnPlateau(optimizer, 'min', patience=3)
-    scheduler = MultiStepLR(optimizer, milestones=[38, 53], gamma=0.1)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=1)
+    # scheduler = MultiStepLR(optimizer, milestones=[38, 53], gamma=0.1)
     criterion = nn.CrossEntropyLoss()
     trainer = Trainer(model, optimizer, criterion, name, train_loader, dev_loader, scheduler=scheduler)
     trainer.run(NUM_EPOCHS)
@@ -248,8 +246,8 @@ def train_model2(train_loader, dev_loader):
         print('Using {} GPUs.'.format(torch.cuda.device_count()))
         model = nn.DataParallel(model)
     optimizer = optim.Adam(model.parameters(),lr=LR)
-    # scheduler = ReduceLROnPlateau(optimizer, 'min', patience=3)
-    scheduler = MultiStepLR(optimizer, milestones=[38, 53], gamma=0.1)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=1)
+    # scheduler = MultiStepLR(optimizer, milestones=[38, 53], gamma=0.1)
     criterion = nn.CrossEntropyLoss()
     trainer = Trainer(model, optimizer, criterion, name, train_loader, dev_loader, scheduler=scheduler)
     trainer.run(NUM_EPOCHS)
