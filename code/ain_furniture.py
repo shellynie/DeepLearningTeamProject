@@ -13,17 +13,17 @@ from torchvision import transforms
 NB_CLASSES = 128
 IMAGE_SIZE = 224
 #TRAIN_DEF = '../data/data/train/1.jpg'
-VAL_DEF = './data/valid/1.jpg'
-TEST_DEF = './data/test/1.jpg'
-DEF = {}
+#VAL_DEF = './data/valid/1.jpg'
+#TEST_DEF = './data/test/1.jpg'
+#DEF = {}
 #DEF['train'] = TRAIN_DEF
-DEF['valid'] = VAL_DEF
-DEF['test'] = TEST_DEF
+#DEF['valid'] = VAL_DEF
+#DEF['test'] = TEST_DEF
 
 class FurnitureDataset(Dataset):
     def __init__(self, preffix: str, transform=None):
         self.preffix = preffix
-        
+        self.idx2id = []
         self.labels = {}
         if preffix != 'test':
             with open(f'./data/{preffix}.csv', newline='') as csvfile:
@@ -31,6 +31,9 @@ class FurnitureDataset(Dataset):
                 for row in reader:
                     idx = int(row['image_id'])
                     id_label = int(row['label_id']) - 1
+                    #if (id_label >= 50):
+                    #    continue
+                    self.idx2id.append(idx)  
                     self.labels[idx] = id_label
 
         self.transform = transform
@@ -39,7 +42,8 @@ class FurnitureDataset(Dataset):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        idx  = idx + 1
+        idx = self.idx2id[idx]
+        #idx  = idx
         p = f'./data/{self.preffix}/{idx}.jpg'
         try:
             img = Image.open(p)
@@ -75,7 +79,7 @@ def collate(batch):
         new_target.append(target)
     return torch.cat(new_img), torch.from_numpy(np.array(new_target))
 
-    
+ 
 def preprocess_crop():
     return transforms.Compose([
         transforms.Resize((IMAGE_SIZE + 20, IMAGE_SIZE + 20)),
@@ -92,7 +96,18 @@ def preprocess_crop():
             std=[0.5, 0.5, 0.5]
         )
     ])
-
+'''
+def preprocess_crop():
+    return transforms.Compose([
+        #transforms.Resize(IMAGE_SIZE),
+        transforms.RandomCrop(IMAGE_SIZE),
+        transforms.ToTensor(),
+        #transforms.Normalize(
+        #    mean=[0.5, 0.5, 0.5],
+        #    std=[0.5, 0.5, 0.5]
+        #)
+    ])
+'''
 class depthwise_separable_conv(nn.Module):
     def __init__(self, nin, nout):
         super(depthwise_separable_conv, self).__init__()
@@ -123,7 +138,7 @@ class AIL(nn.Module):
         # shifting window
         Xs = self.window(Xc) 
         Wa = self.window(W)
-        X_out = Xs/Wa
+        X_out = Xs/(Wa + 1e-16)
         return X_out
     
 class _DenseLayer(nn.Sequential):
@@ -181,7 +196,7 @@ class AINDense(nn.Module):
         x = self.fc(x)
         return x
 
-def training_routine(net, n_iters, gpu, train_generator, dev_generator, test_generator):
+def training_routine(net, n_iters, gpu, train_generator, dev_generator):
     if gpu:
         net = net.cuda()
         print("Using GPU")
@@ -190,50 +205,69 @@ def training_routine(net, n_iters, gpu, train_generator, dev_generator, test_gen
         
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=0.002, weight_decay=1e-6)
-    best_acc = 0
-    
+    best_acc = 0.29
+
+    #net.load_state_dict(torch.load('myModel'))
+
     for i in range(n_iters):
+        
+        print('Start training...')
         # Training
         net.train()
         loss_sum = 0
         data_num = 0
-        for local_batch, local_labels in train_generator:
+        for b, (local_batch, local_labels) in enumerate(train_generator):
             if gpu:
+                torch.cuda.empty_cache()
                 local_batch, local_labels = local_batch.cuda(), local_labels.cuda()
             train_output = net(local_batch)
-            train_prediction = train_output.cpu().detach().argmax(dim=1).numpy()
+            #train_prediction = train_output.cpu().detach().argmax(dim=1).numpy()
             train_loss = criterion(train_output, local_labels.long())
             train_loss.backward()
             optimizer.step()
             optimizer.zero_grad()
             loss_sum += train_loss.data
             data_num += len(local_batch)
+            print(b)
             print(loss_sum/data_num, end = '\r')
-        print('[TRAIN]  Epoch [%d]   Loss: %.4f'
-                    % (i, loss_sum))    
+        print('[TRAIN]  Epoch [%d]   Loss: %.4f    Data_num: %d'
+                    % (i, loss_sum, data_num))  
+
+        print("Saving model for epoch " + str(i))
+        torch.save(net.state_dict(), 'myModel2')  
+    
 
         # Validate
         with torch.no_grad():
+            print('Start validating...')
             net.eval()
             acc = 0
             loss_sum = 0
             data_num = 0
             for local_batch, local_labels in dev_generator:
                 if gpu:
+                    torch.cuda.empty_cache()
                     local_batch, local_labels = local_batch.cuda(),local_labels.cuda()
                 test_output = net(local_batch)
                 test_loss = criterion(test_output, local_labels.long())
-                test_prediction = test_output.cpu().detach().argmax(dim=1).numpy()
+                '''
+                valid_pred = torch.argmax(test_output, dim=1)
+                predicted = valid_pred.eq(local_labels)
+                acc += predicted.sum()
+                '''
+                test_prediction = test_output.cpu().argmax(dim=1).numpy()
                 acc = acc + (test_prediction == local_labels.cpu().numpy()).sum()
-                loss_sum += train_loss.data
+                
+                loss_sum += test_loss.data
                 data_num += len(local_batch)
-                print(loss_sum/data_num, ' ', acc/data_num,end = '\r')
+                print(loss_sum/data_num, ' ', acc/data_num, end = '\r')
             print('[Val]  Epoch [%d]   Loss: %.4f  Acc: %.4f'  
                         % (i, loss_sum, acc/data_num)) 
             if acc/data_num > best_acc:
                 best_acc = acc/data_num
                 print("Saving model, predictions and generated output for epoch " + str(i)+" with acc: " + str(best_acc))
-                torch.save(net.state_dict(), 'myModel')  
+                torch.save(net.state_dict(), 'myModel_acc')  
+    '''
     # test
     with torch.no_grad():
         net.eval()
@@ -251,6 +285,7 @@ def training_routine(net, n_iters, gpu, train_generator, dev_generator, test_gen
                         % (acc/data_num))  
 
     net = net.cpu()
+    '''
     
     
 def weights_init(m):
@@ -258,18 +293,17 @@ def weights_init(m):
         nn.init.xavier_normal_(m.weight.data)
 
 
-
 def main():
     gpu = torch.cuda.is_available()
     model = AINDense()
-    model.apply(weights_init)
-    #model.load_state_dict(torch.load('myModel'))
+    #model.apply(weights_init)
+    model.load_state_dict(torch.load('myModel4'))
       
-    n_iters = 1
-    batch_size = 100
+    n_iters = 5
+    batch_size = 256
 
     train_generator = DataLoader(
-        dataset = FurnitureDataset('valid', transform=preprocess_crop()),
+        dataset = FurnitureDataset('train', transform=preprocess_crop()),
         num_workers = 0,
         batch_size = batch_size,
         shuffle = True,
@@ -283,16 +317,17 @@ def main():
         shuffle = False,
         collate_fn = collate
     )
-    
+    '''
     test_generator = DataLoader(
-        dataset = FurnitureDataset('test', transform=preprocess_crop()),
+        dataset = FurnitureDataset('valid', transform=preprocess_crop()),
         num_workers = 0,
         batch_size = batch_size,
         shuffle = False,
         collate_fn = collate
     )
+    '''
 
-    training_routine(model, n_iters, gpu, train_generator, dev_generator, test_generator)
+    training_routine(model, n_iters, gpu, train_generator, dev_generator)
     
 if __name__ == '__main__':
     print('main')
